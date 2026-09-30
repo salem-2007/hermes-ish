@@ -29,6 +29,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 REPO_OWNER="${HERMES_REPO_OWNER:-NousResearch}"
 REPO_NAME="${HERMES_REPO_NAME:-hermes-agent}"
+ISH_REPO="${HERMES_ISH_REPO:-$REPO_OWNER/hermes-ish}"   # repo hosting the patches
 VERSION="${HERMES_VERSION:-main}"          # branch or tag, e.g. main / v2026.9.24
 PROXY="${HERMES_PROXY:-https://gh-proxy.org}"   # GitHub accelerator for CN networks
 PIP_MIRROR="${HERMES_PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
@@ -36,7 +37,8 @@ NPM_MIRROR="${HERMES_NPM_MIRROR:-https://registry.npmmirror.com}"
 ALPINE_EDGE="${HERMES_ALPINE_EDGE:-https://mirrors.cloud.tencent.com/alpine/edge/main/aarch64}"
 SKIP_NODE=0
 WRITE_PROFILE=1
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || echo "$PWD")"
+[ -f "$SCRIPT_DIR/install.sh" ] || SCRIPT_DIR=""   # piped via curl: no local files
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -75,7 +77,7 @@ require_ish() {
 # --- 1. prerequisites --------------------------------------------------------
 step "System prerequisites"
 apk update >/dev/null 2>&1 || warn "apk update failed (offline?)"
-for pkg in bash curl tar xz gzip git libstdc++ openssl ca-certificates; do
+for pkg in bash curl tar xz gzip git python3 libstdc++ openssl ca-certificates; do
     if ! apk info -e "$pkg" >/dev/null 2>&1; then
         log "installing $pkg"
         apk add "$pkg" >/dev/null 2>&1 || warn "could not install $pkg"
@@ -87,8 +89,13 @@ ok "prerequisites ready"
 step "Downloading Hermes Agent ($VERSION)"
 mkdir -p "$HERMES_HOME/logs"
 TARBALL="$HERMES_HOME/hermes-src.tar.gz"
-SRC_URL="$PROXY/https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$VERSION.tar.gz"
-case "$VERSION" in v*|*.*) SRC_URL="$PROXY/https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/tags/$VERSION.tar.gz" ;; esac
+# "v" prefix or a dotted numeric version -> release tag; otherwise a branch.
+case "$VERSION" in
+    v*)      REF_KIND="tags" ;;
+    [0-9]*.[0-9]*) REF_KIND="tags" ;;
+    *)       REF_KIND="heads" ;;
+esac
+SRC_URL="$PROXY/https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/$REF_KIND/$VERSION.tar.gz"
 
 fetch_tarball() {
     local i=0
@@ -197,13 +204,19 @@ ok "uv $("$UV" --version 2>/dev/null | head -1)"
 # --- 6. apply iSH patches ----------------------------------------------------
 step "Applying iSH patches"
 PATCH_SCRIPT="$SCRIPT_DIR/patches/apply-patches.py"
+ASSET_LOCKFILL="$SCRIPT_DIR/assets/ish-lockfill.py"
+ASSET_RMSHIM="$SCRIPT_DIR/assets/rm-shim.mjs"
 if [ ! -f "$PATCH_SCRIPT" ]; then
-    # Standalone mode (script piped straight from the web): fetch the patcher.
-    warn "patches/ not found next to install.sh — fetching from the repo"
-    curl -fsSL --retry 3 --retry-all-errors \
-        "$PROXY/https://raw.githubusercontent.com/$REPO_OWNER/hermes-ish/main/patches/apply-patches.py" \
-        -o /tmp/apply-patches.py 2>/dev/null || true
-    PATCH_SCRIPT=/tmp/apply-patches.py
+    # Standalone mode (piped straight from the web): fetch the patcher + assets.
+    warn "patches/ not found next to install.sh — fetching from $ISH_REPO"
+    mkdir -p /tmp/hermes-ish/patches /tmp/hermes-ish/assets
+    base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/main"
+    curl -fsSL --retry 3 --retry-all-errors "$base/patches/apply-patches.py" -o /tmp/hermes-ish/patches/apply-patches.py 2>/dev/null || true
+    curl -fsSL --retry 3 --retry-all-errors "$base/assets/ish-lockfill.py"    -o /tmp/hermes-ish/assets/ish-lockfill.py 2>/dev/null || true
+    curl -fsSL --retry 3 --retry-all-errors "$base/assets/rm-shim.mjs"        -o /tmp/hermes-ish/assets/rm-shim.mjs 2>/dev/null || true
+    PATCH_SCRIPT=/tmp/hermes-ish/patches/apply-patches.py
+    ASSET_LOCKFILL=/tmp/hermes-ish/assets/ish-lockfill.py
+    ASSET_RMSHIM=/tmp/hermes-ish/assets/rm-shim.mjs
 fi
 [ -f "$PATCH_SCRIPT" ] || fail "patch script unavailable"
 "$PY" "$PATCH_SCRIPT" --source "$INSTALL_DIR" || fail "patch application failed"
@@ -240,11 +253,8 @@ if [ "$SKIP_NODE" = "0" ]; then
 
     step "Node dependencies (lockfile restore)"
     # Full `npm ci` cannot finish on iSH; rebuild from package-lock.json.
-    if [ -f "$SCRIPT_DIR/assets/ish-lockfill.py" ]; then
-        LOCKFILL="$SCRIPT_DIR/assets/ish-lockfill.py"
-    else
-        LOCKFILL="$INSTALL_DIR/scripts/build/ish-lockfill.py"
-    fi
+    LOCKFILL="$ASSET_LOCKFILL"
+    [ -f "$LOCKFILL" ] || LOCKFILL="$INSTALL_DIR/scripts/build/ish-lockfill.py"
     [ -f "$LOCKFILL" ] || fail "ish-lockfill.py not found"
     "$PY" "$LOCKFILL" --source "$INSTALL_DIR" 2>&1 | tail -5 \
         || warn "node dependency restore reported failures (build may still work)"
