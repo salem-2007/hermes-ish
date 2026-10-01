@@ -19,7 +19,7 @@
 #      -> skipped on iSH.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<user>/hermes-ish/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/salem-2007/hermes-ish/master/install.sh | bash
 #   or: bash install.sh [--dir PATH] [--version TAG] [--skip-node] [--no-profile]
 # =============================================================================
 set -uo pipefail
@@ -29,12 +29,13 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 REPO_OWNER="${HERMES_REPO_OWNER:-NousResearch}"
 REPO_NAME="${HERMES_REPO_NAME:-hermes-agent}"
-ISH_REPO="${HERMES_ISH_REPO:-$REPO_OWNER/hermes-ish}"   # repo hosting the patches
+ISH_REPO="${HERMES_ISH_REPO:-salem-2007/hermes-ish}"   # repo hosting the patches
 VERSION="${HERMES_VERSION:-main}"          # branch or tag, e.g. main / v2026.9.24
 PROXY="${HERMES_PROXY:-https://gh-proxy.org}"   # GitHub accelerator for CN networks
 PIP_MIRROR="${HERMES_PIP_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 NPM_MIRROR="${HERMES_NPM_MIRROR:-https://registry.npmmirror.com}"
-ALPINE_EDGE="${HERMES_ALPINE_EDGE:-https://mirrors.cloud.tencent.com/alpine/edge/main/aarch64}"
+# Alpine edge mirrors are tried in order for the OpenSSL/SQLite/Python apks;
+# individual mirrors lag or drop old -rN revisions, so a list beats one host.
 SKIP_NODE=0
 WRITE_PROFILE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || echo "$PWD")"
@@ -128,24 +129,66 @@ fi
 # Alpine 3.21 ships OpenSSL 3.3.x, whose libcrypto lacks EVP_MD_CTX_get_size_ex
 # (needed by Python 3.14's _hashlib -> scrypt) and whose libssl is too old for
 # some endpoints. Edge's 3.5.8 has both, and its TLS works on iSH.
+#
+# Edge rolls releases often, so a pinned -rN can 404 on a given mirror the day
+# after it ships (observed: 3.5.8-r1 missing from tencent/tuna, present on
+# ustc/official). We therefore try mirrors in order AND fall back to reading
+# each mirror's APKINDEX to discover the current version.
 step "System libraries (OpenSSL / SQLite from Alpine edge)"
 
-apk_fetch() {  # apk_fetch <pkg> <ver> <dest>
-    local pkg="$1" ver="$2" dest="$3" f="/tmp/$pkg-$ver.apk"
-    [ -f "$dest" ] && return 0
-    log "fetching $pkg $ver"
-    curl -fsSL --retry 3 --retry-all-errors -o "$f" "$ALPINE_EDGE/$pkg-$ver.apk" || return 1
-    tar xzf "$f" -C "$dest" 2>/dev/null
+APK_MIRRORS="${HERMES_APK_MIRRORS:-\
+https://mirrors.ustc.edu.cn/alpine/edge/main/aarch64 \
+https://dl-cdn.alpinelinux.org/alpine/edge/main/aarch64 \
+https://mirrors.cloud.tencent.com/alpine/edge/main/aarch64 \
+https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main/aarch64}"
+
+# apk_index_version <pkg>: read a mirror's APKINDEX and print the current version.
+apk_index_version() {  # $1=mirror $2=pkg
+    local mirror="$1" pkg="$2" idx="/tmp/apkidx.$$"
+    curl -fsSL -m 60 -o "$idx.tgz" "$mirror/APKINDEX.tar.gz" 2>/dev/null || return 1
+    tar xzf "$idx.tgz" -C /tmp "APKINDEX" 2>/dev/null || return 1
+    awk -v p="$pkg" '
+        $0 == "P:" p {found=1; next}
+        found && /^V:/ {print substr($0,3); exit}
+        found && /^P:/ {found=0}
+    ' /tmp/APKINDEX 2>/dev/null
+    rm -f "$idx.tgz" /tmp/APKINDEX
+}
+
+# apk_fetch <pkg> <dest> [pinned-ver...]: try each mirror with each version,
+# then discover the current version from the mirror index as a last resort.
+apk_fetch() {
+    local pkg="$1" dest="$2"; shift 2
+    [ -d "$dest" ] && [ "$(ls -A "$dest" 2>/dev/null)" ] && return 0
+    local ver mirror f ok=1
+    for ver in "$@"; do
+        for mirror in $APK_MIRRORS; do
+            f="/tmp/$pkg-$ver.apk"
+            if [ ! -f "$f" ]; then
+                curl -fsSL --retry 2 --retry-all-errors -m 90 -o "$f" "$mirror/$pkg-$ver.apk" 2>/dev/null || continue
+            fi
+            if tar xzf "$f" -C "$dest" 2>/dev/null; then ok=0; break 2; fi
+        done
+    done
+    if [ $ok -ne 0 ]; then
+        # Pinned versions gone everywhere: ask the mirrors what's current.
+        for mirror in $APK_MIRRORS; do
+            ver="$(apk_index_version "$mirror" "$pkg")" || continue
+            [ -n "$ver" ] || continue
+            f="/tmp/$pkg-$ver.apk"
+            curl -fsSL --retry 2 --retry-all-errors -m 90 -o "$f" "$mirror/$pkg-$ver.apk" 2>/dev/null || continue
+            if tar xzf "$f" -C "$dest" 2>/dev/null; then ok=0; log "$pkg: using $ver from $(echo "$mirror" | cut -d/ -f3)"; break; fi
+        done
+    fi
+    [ $ok -eq 0 ]
 }
 
 mkdir -p /opt/openssl35 /opt/sqlite-libs /opt/py314
-apk_fetch libcrypto3 3.5.8-r1 /opt/openssl35 \
-    || apk_fetch libcrypto3 3.5.8-r0 /opt/openssl35 \
-    || warn "libcrypto3 fetch failed"
-apk_fetch libssl3 3.5.8-r1 /opt/openssl35 \
-    || apk_fetch libssl3 3.5.8-r0 /opt/openssl35 \
-    || warn "libssl3 fetch failed"
-apk_fetch sqlite-libs 3.53.4-r0 /opt/sqlite-libs \
+apk_fetch libcrypto3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
+    || warn "libcrypto3 fetch failed — TLS may not work"
+apk_fetch libssl3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
+    || warn "libssl3 fetch failed — TLS may not work"
+apk_fetch sqlite-libs /opt/sqlite-libs 3.53.4-r0 \
     || warn "sqlite-libs fetch failed"
 
 install_lib() {  # install_lib <src> <dstname>
@@ -175,7 +218,7 @@ ok "system libraries updated (originals in /opt/ish-backup)"
 # TLS on iSH. Edge's python3 links the system libssl dynamically and works.
 step "Python 3.14 (Alpine edge, dynamic OpenSSL)"
 if [ ! -x /opt/py314/usr/bin/python3.14 ]; then
-    apk_fetch python3 3.14.7-r0 /opt/py314 || fail "python3.14 apk fetch failed"
+    apk_fetch python3 /opt/py314 3.14.7-r0 || fail "python3.14 apk fetch failed"
 fi
 [ -x /opt/py314/usr/bin/python3.14 ] || fail "python3.14 not extracted"
 
@@ -210,10 +253,13 @@ if [ ! -f "$PATCH_SCRIPT" ]; then
     # Standalone mode (piped straight from the web): fetch the patcher + assets.
     warn "patches/ not found next to install.sh — fetching from $ISH_REPO"
     mkdir -p /tmp/hermes-ish/patches /tmp/hermes-ish/assets
-    base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/main"
-    curl -fsSL --retry 3 --retry-all-errors "$base/patches/apply-patches.py" -o /tmp/hermes-ish/patches/apply-patches.py 2>/dev/null || true
-    curl -fsSL --retry 3 --retry-all-errors "$base/assets/ish-lockfill.py"    -o /tmp/hermes-ish/assets/ish-lockfill.py 2>/dev/null || true
-    curl -fsSL --retry 3 --retry-all-errors "$base/assets/rm-shim.mjs"        -o /tmp/hermes-ish/assets/rm-shim.mjs 2>/dev/null || true
+    for branch in master main; do
+        base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/$branch"
+        curl -fsSL --retry 2 --retry-all-errors "$base/patches/apply-patches.py" -o /tmp/hermes-ish/patches/apply-patches.py 2>/dev/null && break
+    done
+    base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/${branch:-master}"
+    curl -fsSL --retry 3 --retry-all-errors "$base/assets/ish-lockfill.py" -o /tmp/hermes-ish/assets/ish-lockfill.py 2>/dev/null || true
+    curl -fsSL --retry 3 --retry-all-errors "$base/assets/rm-shim.mjs" -o /tmp/hermes-ish/assets/rm-shim.mjs 2>/dev/null || true
     PATCH_SCRIPT=/tmp/hermes-ish/patches/apply-patches.py
     ASSET_LOCKFILL=/tmp/hermes-ish/assets/ish-lockfill.py
     ASSET_RMSHIM=/tmp/hermes-ish/assets/rm-shim.mjs
@@ -222,15 +268,44 @@ fi
 "$PY" "$PATCH_SCRIPT" --source "$INSTALL_DIR" || fail "patch application failed"
 
 # --- 7. virtualenv + Python dependencies -------------------------------------
+# uv on iSH can exit 0 with packages missing (the emulated runtime trips its
+# extraction paths): observed a full install "succeeding" with 19 of ~230
+# packages on disk. Every run is therefore verified against a sentinel import
+# and retried, which converges (the second pass repairs the partial tree).
 step "Python environment"
 cd "$INSTALL_DIR"
 export UV_DEFAULT_INDEX="$PIP_MIRROR"
 export UV_HTTP_TIMEOUT=120
+export UV_LINK_MODE=copy
+export UV_CONCURRENT_DOWNLOADS=4
 rm -rf .venv
 "$UV" venv --python "$PY" .venv >/dev/null 2>&1 || fail "venv creation failed"
-"$UV" pip install -e . > "$HERMES_HOME/logs/pip-install.log" 2>&1 \
-    || fail "python dependencies failed — see $HERMES_HOME/logs/pip-install.log"
-ok "python dependencies installed"
+
+deps_ok() {  # sentinel: the heavy imports Hermes cannot start without
+    .venv/bin/python - << 'PYEOF' >/dev/null 2>&1
+import openai, aiohttp, pydantic, rich, httpx, prompt_toolkit  # noqa
+PYEOF
+}
+
+deps_install() {
+    "$UV" pip install -e ".[all]" > "$HERMES_HOME/logs/pip-install.log" 2>&1
+}
+
+deps_install || deps_install  # one retry absorbs transient mirror stalls
+if ! deps_ok; then
+    warn "dependency tree incomplete after first pass — repairing"
+    # uv refuses to patch a tree with half-written dist-info; a second explicit
+    # pass over the same interpreter converges in practice. One more retry:
+    deps_install || true
+    if ! deps_ok; then
+        # Nuclear option: rebuild the venv from scratch and install once more.
+        rm -rf .venv
+        "$UV" venv --python "$PY" .venv >/dev/null 2>&1 || fail "venv recreation failed"
+        deps_install || fail "python dependencies failed — see $HERMES_HOME/logs/pip-install.log"
+        deps_ok || fail "python dependencies still incomplete — see $HERMES_HOME/logs/pip-install.log"
+    fi
+fi
+ok "python dependencies installed ($(ls .venv/lib/python3.14/site-packages 2>/dev/null | wc -l) packages)"
 
 # --- 8. Node dependencies (TUI + web UI) -------------------------------------
 if [ "$SKIP_NODE" = "0" ]; then
