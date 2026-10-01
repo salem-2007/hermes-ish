@@ -193,15 +193,22 @@ case "$VERSION" in
     [0-9]*.[0-9]*) REF_KIND="tags" ;;
     *)       REF_KIND="heads" ;;
 esac
-SRC_URL="$PROXY/https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/$REF_KIND/$VERSION.tar.gz"
+# Accel first, direct as fallback: CN proxies get rate-limited (HTTP 429) and
+# direct GitHub is unstable on some networks — try both before giving up.
+SRC_URL_PROXY="$PROXY/https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/$REF_KIND/$VERSION.tar.gz"
+SRC_URL_DIRECT="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/$REF_KIND/$VERSION.tar.gz"
 
 fetch_tarball() {
-    local i=0
-    while [ $i -lt 20 ]; do
+    local i=0 url
+    while [ $i -lt 12 ]; do
         i=$((i+1))
-        log "download attempt $i"
+        if [ $((i % 2)) -eq 1 ]; then
+            url="$SRC_URL_PROXY"; log "下载尝试 $i (加速: $(echo "$PROXY" | cut -d/ -f3))"
+        else
+            url="$SRC_URL_DIRECT"; log "下载尝试 $i (直连 GitHub)"
+        fi
         if curl -fsSL --retry 4 --retry-delay 2 --retry-all-errors \
-                --connect-timeout 20 -C - -o "$TARBALL" "$SRC_URL"; then
+                --connect-timeout 20 -C - -o "$TARBALL" "$url"; then
             gzip -t "$TARBALL" 2>/dev/null && return 0
         fi
         sleep 3
@@ -435,13 +442,21 @@ if [ ! -f "$PATCH_SCRIPT" ]; then
     # Standalone mode (piped straight from the web): fetch the patcher + assets.
     warn "patches/ not found next to install.sh — fetching from $ISH_REPO"
     mkdir -p /tmp/hermes-ish/patches /tmp/hermes-ish/assets
-    for branch in master main; do
-        base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/$branch"
-        curl -fsSL --retry 2 --retry-all-errors "$base/patches/apply-patches.py" -o /tmp/hermes-ish/patches/apply-patches.py 2>/dev/null && break
-    done
-    base="$PROXY/https://raw.githubusercontent.com/$ISH_REPO/${branch:-master}"
-    curl -fsSL --retry 3 --retry-all-errors "$base/assets/ish-lockfill.py" -o /tmp/hermes-ish/assets/ish-lockfill.py 2>/dev/null || true
-    curl -fsSL --retry 3 --retry-all-errors "$base/assets/rm-shim.mjs" -o /tmp/hermes-ish/assets/rm-shim.mjs 2>/dev/null || true
+    raw_fetch() {  # raw_fetch <repo-branch-relative-path> <dest>
+        local rel="$1" dest="$2" branch
+        for branch in master main; do
+            curl -fsSL --retry 2 --retry-all-errors -o "$dest" \
+                "$PROXY/https://raw.githubusercontent.com/$ISH_REPO/$branch/$rel" 2>/dev/null \
+                && [ -s "$dest" ] && return 0
+            curl -fsSL --retry 2 --retry-all-errors -o "$dest" \
+                "https://raw.githubusercontent.com/$ISH_REPO/$branch/$rel" 2>/dev/null \
+                && [ -s "$dest" ] && return 0
+        done
+        rm -f "$dest"; return 1
+    }
+    raw_fetch patches/apply-patches.py /tmp/hermes-ish/patches/apply-patches.py || true
+    raw_fetch assets/ish-lockfill.py /tmp/hermes-ish/assets/ish-lockfill.py || true
+    raw_fetch assets/rm-shim.mjs /tmp/hermes-ish/assets/rm-shim.mjs || true
     PATCH_SCRIPT=/tmp/hermes-ish/patches/apply-patches.py
     ASSET_LOCKFILL=/tmp/hermes-ish/assets/ish-lockfill.py
     ASSET_RMSHIM=/tmp/hermes-ish/assets/rm-shim.mjs

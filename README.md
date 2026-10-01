@@ -75,12 +75,23 @@ curl -fsSL https://raw.githubusercontent.com/<your-user>/hermes-ish/main/install
 |---|---|---|---|
 | `--dir PATH` | `HERMES_INSTALL_DIR` | `~/.hermes/hermes-agent` | Install location |
 | `--version REF` | `HERMES_VERSION` | `main` | Branch or tag to install |
-| `--proxy URL` | `HERMES_PROXY` | `https://gh-proxy.org` | GitHub accelerator |
+| `--proxy URL` | `HERMES_PROXY` | `https://gh-proxy.org` | GitHub accelerator (set empty `HERMES_PROXY=""` to go direct) |
 | — | `HERMES_PIP_MIRROR` | Tsinghua | PyPI mirror |
 | — | `HERMES_NPM_MIRROR` | npmmirror | npm mirror |
 | `--skip-node` | — | off | Skip the TUI/web UI toolchain |
 | `--no-profile` | — | off | Don't write `/etc/profile.d/hermes.sh` |
 | — | `HERMES_FORCE=1` | — | Run on non-iSH Alpine |
+
+### GitHub access
+
+Downloads go through an accelerator first and **fall back to direct GitHub** on
+failure, so a rate-limited proxy (HTTP 429) or a flaky proxy does not break the
+install. To use a different accelerator, or none at all:
+
+```sh
+HERMES_PROXY=https://your-accelerator bash install.sh   # custom accel
+HERMES_PROXY="" bash install.sh                          # always direct
+```
 
 ## After installing
 
