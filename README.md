@@ -5,7 +5,7 @@ Run [Nous Research's Hermes Agent](https://github.com/NousResearch/hermes-agent)
 The stock installer fails on iSH. This repo is an installer plus the compatibility patches that make it work.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<your-user>/hermes-ish/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/salem-2007/hermes-ish/main/install.sh | bash
 ```
 
 ---
@@ -33,7 +33,7 @@ Two more environment issues are handled by the installer:
 
 ### Supported architectures
 
-| Arch | Status |
+| Arch |状态|
 |---|---|
 | **aarch64** (arm64 — iPhone/iPad) | ✅ verified end-to-end |
 | x86_64 | not verified |
