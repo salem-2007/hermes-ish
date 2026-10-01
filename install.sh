@@ -263,9 +263,11 @@ verify_openssl() {
     return 1
 }
 
-# Force re-fetch if existing libraries are incomplete or wrong version.
-if [ -d /opt/openssl35/usr/lib ] && ! verify_openssl /opt/openssl35/usr/lib/libcrypto.so.3; then
-    log "stale OpenSSL detected in /opt/openssl35 — re-fetching"
+# Force re-fetch if the actual library files are missing or wrong version.
+# The old check only tested the directory; apk_fetch extracts into usr/lib/
+# so we must verify the final file path.
+if ! verify_openssl /opt/openssl35/usr/lib/libcrypto.so.3; then
+    log "OpenSSL libraries missing or stale in /opt/openssl35 — re-fetching"
     rm -rf /opt/openssl35/*
 fi
 
@@ -320,9 +322,9 @@ PY=/opt/py314/usr/bin/python3.14
 # libpython3.14.so which may not be on the default loader path yet.
 # Try bare first, then with progressive overrides.
 if ! "$PY" -c "import ssl" 2>/dev/null; then
-    # Build a combined LD_LIBRARY_PATH covering all edge libs
+        # Build a combined LD_LIBRARY_PATH covering all edge libs (only existing dirs)
     _extra=""
-    [ -d /opt/openssl35/usr/lib ] && _extra="/opt/openssl35/usr/lib"
+    [ -f /opt/openssl35/usr/lib/libssl.so.3 ] && _extra="/opt/openssl35/usr/lib"
     [ -d /opt/py314/usr/lib ] && { [ -n "$_extra" ] && _extra="$_extra:/opt/py314/usr/lib" || _extra="/opt/py314/usr/lib"; }
     if [ -n "$_extra" ]; then
         export LD_LIBRARY_PATH="$_extra:${LD_LIBRARY_PATH:-}"
