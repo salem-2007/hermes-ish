@@ -41,6 +41,7 @@ WRITE_PROFILE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || echo "$PWD")"
 [ -f "$SCRIPT_DIR/install.sh" ] || SCRIPT_DIR=""   # piped via curl: no local files
 
+ALLOW_UNTESTED_ARCH=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir) INSTALL_DIR="$2"; shift 2 ;;
@@ -48,8 +49,9 @@ while [ $# -gt 0 ]; do
         --proxy) PROXY="$2"; shift 2 ;;
         --skip-node) SKIP_NODE=1; shift ;;
         --no-profile) WRITE_PROFILE=0; shift ;;
+        --allow-untested-arch) ALLOW_UNTESTED_ARCH=1; shift ;;
         -h|--help)
-            sed -n '2,30p' "$0"; exit 0 ;;
+            sed -n '2,32p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -64,6 +66,39 @@ fi
 log()   { printf '%s→%s %s\n' "$C_CYAN" "$C_NC" "$1"; }
 ok()    { printf '%s✓%s %s\n' "$C_GREEN" "$C_NC" "$1"; }
 warn()  { printf '%s⚠%s %s\n' "$C_YELLOW" "$C_NC" "$1"; }
+
+# --- architecture guard ------------------------------------------------------
+# The pinned toolchain (Alpine edge python3/OpenSSL apks, the unofficial-builds
+# Node musl archive, hermes' own linux-*-musl targets) is verified on aarch64
+# only. On a mismatched host those binaries cannot execute — and worse, the
+# system-library stage would plant foreign-arch .so files into /usr/lib before
+# that becomes obvious, breaking curl/apk/git on the device. Refuse up front.
+ARCH="$(uname -m)"
+case "$ARCH" in
+    aarch64|arm64)      APK_ARCH="aarch64" ;;
+    x86_64|amd64)       APK_ARCH="x86_64" ;;
+    i386|i486|i586|i686) APK_ARCH="x86" ;;
+    armv7l|armv7|armhf) APK_ARCH="armv7" ;;
+    *)                  APK_ARCH="" ;;
+esac
+if [ -z "$APK_ARCH" ]; then
+    printf '%s✗ unsupported CPU architecture: %s%s\n' "$C_RED" "$ARCH" "$C_NC" >&2
+    printf '  Hermes on iSH is verified on aarch64 (iPhone/iPad) only.\n' >&2
+    exit 1
+fi
+if [ "$APK_ARCH" != "aarch64" ] && [ "$ALLOW_UNTESTED_ARCH" != "1" ]; then
+    printf '%s✗ %s is not a verified target (only aarch64 is).%s\n' "$C_RED" "$ARCH" "$C_NC" >&2
+    cat >&2 <<'EOMSG'
+  Hermes 上游只为 linux-{x64,arm64}-musl 提供工具链，32 位没有对应构建；
+  Alpine edge 虽有 x86 的 nodejs 包，但它依赖 icu/nghttp2/simdjson 等一串额外运行库，
+  且 hermes 自身的 pm 只认 linux-*-musl 这几个 target。
+  强行继续会把异架构的 .so 写进 /usr/lib，破坏系统 TLS（curl/apk/git 全部失效）。
+  想自行尝试请加 --allow-untested-arch（未经验证，可能损坏系统）。
+EOMSG
+    exit 1
+fi
+printf '%s→%s 架构 %s (APK: %s)\n' "$C_CYAN" "$C_NC" "$ARCH" "$APK_ARCH"
+
 fail()  { printf '%s✗%s %s\n' "$C_RED" "$C_NC" "$1" >&2; exit 1; }
 
 # --- progress bar & stage tracker --------------------------------------------
@@ -201,10 +236,10 @@ fi
 step "System libraries (OpenSSL / SQLite from Alpine edge)"
 
 APK_MIRRORS="${HERMES_APK_MIRRORS:-\
-https://mirrors.ustc.edu.cn/alpine/edge/main/aarch64 \
-https://dl-cdn.alpinelinux.org/alpine/edge/main/aarch64 \
-https://mirrors.cloud.tencent.com/alpine/edge/main/aarch64 \
-https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main/aarch64}"
+https://mirrors.cloud.tencent.com/alpine/edge/main/$APK_ARCH \
+https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main/$APK_ARCH \
+https://dl-cdn.alpinelinux.org/alpine/edge/main/$APK_ARCH \
+https://mirrors.ustc.edu.cn/alpine/edge/main/$APK_ARCH}"
 
 # apk_index_version <pkg>: read a mirror's APKINDEX and print the current version.
 apk_index_version() {  # $1=mirror $2=pkg

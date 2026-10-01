@@ -31,6 +31,33 @@ Two more environment issues are handled by the installer:
 - Network access to GitHub (a proxy is used by default for CN networks)
 - Patience — iSH emulates the CPU, so installs and first launches take minutes
 
+### Supported architectures
+
+| Arch | Status |
+|---|---|
+| **aarch64** (arm64 — iPhone/iPad) | ✅ verified end-to-end |
+| x86_64 | not verified |
+| i386/i686, armv7 | **refused by default** |
+
+The pinned toolchain is aarch64-only: Hermes' own package manager targets
+`linux-{x64,arm64}-musl`, the Node musl archive is arm64/x64 only, and Alpine
+edge's 32-bit `nodejs` package pulls in a whole extra runtime closure
+(icu/nghttp2/simdjson/brotli/c-ares) that nothing here has been tested against.
+
+The installer refuses to run on other architectures *before* touching anything,
+because a mismatched run would plant foreign-arch `.so` files into `/usr/lib`
+and break TLS for `curl`/`apk`/`git`. Override with `--allow-untested-arch` at
+your own risk.
+
+> **Repaired an interrupted run on a 32-bit device?** Restore the stock
+> libraries the script replaced:
+> ```sh
+> cp -a /opt/ish-backup/libssl.so.3 /opt/ish-backup/libcrypto.so.3 /usr/lib/ 2>/dev/null
+> rm -f /usr/lib/libpython3.14.so.1.0 /usr/lib/libpython3.so
+> rm -rf /opt/py314 /opt/openssl35 /opt/sqlite-libs
+> apk update && apk upgrade -a
+> ```
+
 ## Install
 
 ```sh
