@@ -370,9 +370,13 @@ export PATH="$HOME/.local/bin:$PATH"
 if command -v node >/dev/null 2>&1 || [ -x "$HERMES_HOME/tools/node-26.7.0-linux-arm64-musl/bin/node" ]; then
     export PATH="$HERMES_HOME/tools/node-26.7.0-linux-arm64-musl/bin:$PATH"
 fi
+
+# Set Chinese as the display language (bundled zh.yaml covers 99.8% of keys).
+hermes config set display.language zh > /dev/null 2>&1 && log "display language set to zh"
+
 # A real command (not --version) triggers dependency completion.
 timeout 1800 hermes config show > "$HERMES_HOME/logs/first-launch.log" 2>&1
-if grep -q "Model" "$HERMES_HOME/logs/first-launch.log" 2>/dev/null; then
+if grep -q "Model\|模型" "$HERMES_HOME/logs/first-launch.log" 2>/dev/null; then
     ok "first launch complete"
 else
     warn "first launch needs a rerun — run: hermes config show"
@@ -381,24 +385,26 @@ fi
 # --- done --------------------------------------------------------------------
 cat << DONE
 
-${C_GREEN}${C_BOLD}Hermes Agent installed for iSH${C_NC}
+${C_GREEN}${C_BOLD}Hermes Agent 安装完成 (iSH)${C_NC}
 
-  command    hermes
-  install    $INSTALL_DIR
-  logs       $HERMES_HOME/logs/
+  命令       hermes
+  安装路径   $INSTALL_DIR
+  日志目录   $HERMES_HOME/logs/
+  界面语言   简体中文 (zh)
 
-Next steps:
-  1. Open a NEW terminal (or: source /etc/profile.d/hermes.sh)
-  2. Configure a model provider:
-       hermes setup          # interactive wizard
-     or point at any OpenAI-compatible endpoint:
+下一步：
+  1. 打开新终端（或执行 source /etc/profile.d/hermes.sh）
+  2. 配置 AI 模型提供商：
+       hermes setup                    # 交互式向导
+     或直接指向 OpenAI 兼容端点：
        hermes config set model.provider custom
        hermes config set model.base_url http://YOUR_HOST:3000/v1
        echo 'LAN_API_KEY=sk-...' >> $HERMES_HOME/.env
-  3. Start chatting:
+  3. 开始对话：
        hermes
 
-Notes:
-  * First startup after an update can take minutes on iSH (emulated CPU).
-  * Stock system libraries were backed up under /opt/ish-backup.
+说明：
+  * iSH 为模拟 CPU，首次启动可能需要数分钟。
+  * 原始系统库已备份到 /opt/ish-backup。
+  * 切换回英文：hermes config set display.language en
 DONE
