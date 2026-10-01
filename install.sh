@@ -298,6 +298,25 @@ verify_openssl() {
     return 1
 }
 
+# If the SYSTEM toolchain already satisfies every requirement, do not touch
+# /usr/lib or /opt at all. Newer Alpine images (3.24+) ship OpenSSL 3.5.9 +
+# Python 3.14.x already, and on iSH replacing working libraries is the single
+# riskiest step. Only fetch and swap when something is actually missing.
+SYSTEM_PY_OK=0
+SYS_PY="$(command -v python3.14 || command -v python3 || true)"
+# Must be >= 3.14 (Hermes gates several extras on it and uv.lock pins 3.14),
+# and must actually be able to complete an HTTPS handshake — an interpreter
+# that passes `import ssl` but cannot negotiate TLS would produce a venv that
+# cannot reach PyPI at all.
+if [ -n "$SYS_PY" ] \
+   && "$SYS_PY" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3,14) else 1)' >/dev/null 2>&1 \
+   && "$SYS_PY" -c 'import ssl,sqlite3,hashlib,urllib.request; hashlib.scrypt(b"x",salt=b"y",n=2,r=8,p=1,dklen=32); urllib.request.urlopen("https://pypi.org/simple/",timeout=30)' >/dev/null 2>&1 \
+   && verify_openssl /usr/lib/libcrypto.so.3; then
+    SYSTEM_PY_OK=1
+    ok "system toolchain already satisfies requirements — keeping it untouched"
+    "$SYS_PY" -c 'import sys,ssl,sqlite3; print("  python %s / %s / sqlite %s" % (sys.version.split()[0], ssl.OPENSSL_VERSION, sqlite3.sqlite_version))'
+fi
+
 # Force re-fetch if the actual library files are missing or wrong version.
 # The old check only tested the directory; apk_fetch extracts into usr/lib/
 # so we must verify the final file path.
@@ -315,12 +334,16 @@ if ! verify_openssl /opt/openssl35/usr/lib/libcrypto.so.3; then
     fi
 fi
 
-apk_fetch libcrypto3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
-    || warn "libcrypto3 fetch failed — TLS may not work"
-apk_fetch libssl3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
-    || warn "libssl3 fetch failed — TLS may not work"
-apk_fetch sqlite-libs /opt/sqlite-libs 3.53.4-r0 \
-    || warn "sqlite-libs fetch failed"
+if [ "$SYSTEM_PY_OK" = "0" ]; then
+    apk_fetch libcrypto3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
+        || warn "libcrypto3 fetch failed — TLS may not work"
+    apk_fetch libssl3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
+        || warn "libssl3 fetch failed — TLS may not work"
+    apk_fetch sqlite-libs /opt/sqlite-libs 3.53.4-r0 \
+        || warn "sqlite-libs fetch failed"
+else
+    log "skipping Alpine edge library fetch (system OpenSSL/SQLite are current)"
+fi
 
 install_lib() {  # install_lib <src> <dstname>
     local src="$1" dst="$2"
@@ -336,18 +359,28 @@ for lib in libssl.so.3 libcrypto.so.3 libsqlite3.so.0; do
     [ -f "/usr/lib/$lib" ] && [ ! -f "/opt/ish-backup/$lib" ] && cp -a "/usr/lib/$lib" /opt/ish-backup/ 2>/dev/null || true
 done
 
-install_lib /opt/openssl35/usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-install_lib /opt/openssl35/usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
-if [ -f /opt/sqlite-libs/usr/lib/libsqlite3.so.3.53.4 ]; then
-    install_lib /opt/sqlite-libs/usr/lib/libsqlite3.so.3.53.4 /usr/lib/libsqlite3.so.3.53.4
-    ln -sf libsqlite3.so.3.53.4 /usr/lib/libsqlite3.so.0
+if [ "$SYSTEM_PY_OK" = "0" ]; then
+    install_lib /opt/openssl35/usr/lib/libssl.so.3 /usr/lib/libssl.so.3
+    install_lib /opt/openssl35/usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
+    if [ -f /opt/sqlite-libs/usr/lib/libsqlite3.so.3.53.4 ]; then
+        install_lib /opt/sqlite-libs/usr/lib/libsqlite3.so.3.53.4 /usr/lib/libsqlite3.so.3.53.4
+        ln -sf libsqlite3.so.3.53.4 /usr/lib/libsqlite3.so.0
+    fi
+    ok "system libraries updated (originals in /opt/ish-backup)"
+else
+    ok "system libraries left as-is (already current; originals untouched)"
 fi
-ok "system libraries updated (originals in /opt/ish-backup)"
 step_done
 
 # --- 4. Alpine edge Python 3.14 (dynamic OpenSSL) ----------------------------
 # uv's python-build-standalone links OpenSSL statically; that build cannot do
 # TLS on iSH. Edge's python3 links the system libssl dynamically and works.
+if [ "$SYSTEM_PY_OK" = "1" ]; then
+    step "Python 3.14 (system interpreter already suitable)"
+    PY="$SYS_PY"
+    ok "using system python: $PY ($("$PY" -c 'import ssl; print(ssl.OPENSSL_VERSION)'))"
+    step_done
+else
 step "Python 3.14 (Alpine edge, dynamic OpenSSL)"
 if [ ! -x /opt/py314/usr/bin/python3.14 ]; then
     apk_fetch python3 /opt/py314 3.14.7-r0 || fail "python3.14 apk fetch failed"
@@ -379,6 +412,7 @@ fi
 "$PY" -c "import sqlite3" 2>/dev/null || warn "edge python sqlite3 import failed"
 ok "python $("$PY" -c 'import sys; print(sys.version.split()[0])') with $("$PY" -c 'import ssl; print(ssl.OPENSSL_VERSION)')"
 step_done
+fi
 
 # --- 5. uv -------------------------------------------------------------------
 step "uv (package manager)"
