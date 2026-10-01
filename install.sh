@@ -267,8 +267,17 @@ verify_openssl() {
 # The old check only tested the directory; apk_fetch extracts into usr/lib/
 # so we must verify the final file path.
 if ! verify_openssl /opt/openssl35/usr/lib/libcrypto.so.3; then
-    log "OpenSSL libraries missing or stale in /opt/openssl35 — re-fetching"
-    rm -rf /opt/openssl35/*
+    # Before re-fetching, check if the SYSTEM libssl already has what we need.
+    # Some iSH installs already have 3.5.x from a prior run or manual upgrade.
+    if verify_openssl /usr/lib/libcrypto.so.3; then
+        log "system OpenSSL already has required symbols — skipping edge fetch"
+        mkdir -p /opt/openssl35/usr/lib
+        cp -a /usr/lib/libssl.so.3 /opt/openssl35/usr/lib/ 2>/dev/null || true
+        cp -a /usr/lib/libcrypto.so.3 /opt/openssl35/usr/lib/ 2>/dev/null || true
+    else
+        log "OpenSSL libraries missing or stale in /opt/openssl35 — re-fetching"
+        rm -rf /opt/openssl35/*
+    fi
 fi
 
 apk_fetch libcrypto3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
