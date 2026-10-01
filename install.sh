@@ -248,6 +248,27 @@ apk_fetch() {
 }
 
 mkdir -p /opt/openssl35 /opt/sqlite-libs /opt/py314
+
+# Verify that a fetched OpenSSL actually has the symbols we need.
+# Edge's python3.14 _hashlib requires EVP_MD_CTX_get_size_ex (>= 3.5.x);
+# if a stale/incomplete /opt/openssl35 passes the directory-exists check,
+# the install_lib cmp would skip it and leave us with a broken libssl.
+verify_openssl() {
+    local lib="$1"
+    [ -f "$lib" ] || return 1
+    # Check for the critical symbol that distinguishes 3.5+ from 3.3
+    nm -D "$lib" 2>/dev/null | grep -q EVP_MD_CTX_get_size_ex && return 0
+    # Fallback: strings scan (nm may not be installed)
+    strings "$lib" 2>/dev/null | grep -q EVP_MD_CTX_get_size_ex && return 0
+    return 1
+}
+
+# Force re-fetch if existing libraries are incomplete or wrong version.
+if [ -d /opt/openssl35/usr/lib ] && ! verify_openssl /opt/openssl35/usr/lib/libcrypto.so.3; then
+    log "stale OpenSSL detected in /opt/openssl35 — re-fetching"
+    rm -rf /opt/openssl35/*
+fi
+
 apk_fetch libcrypto3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
     || warn "libcrypto3 fetch failed — TLS may not work"
 apk_fetch libssl3 /opt/openssl35 3.5.8-r1 3.5.8-r0 \
@@ -293,7 +314,16 @@ if [ ! -f /usr/lib/libpython3.14.so.1.0 ]; then
     cp -a /opt/py314/usr/lib/libpython3.so /usr/lib/ 2>/dev/null || true
 fi
 PY=/opt/py314/usr/bin/python3.14
-"$PY" -c "import ssl" 2>/dev/null || fail "edge python cannot import ssl"
+# Edge python needs both libpython on the loader path AND a matching OpenSSL.
+# If the system libssl is too old (3.3.x) but /opt/openssl35 has 3.5.x, we
+# need LD_LIBRARY_PATH to pick it up. Try bare first, then with the override.
+if ! "$PY" -c "import ssl" 2>/dev/null; then
+    if [ -d /opt/openssl35/usr/lib ]; then
+        export LD_LIBRARY_PATH="/opt/openssl35/usr/lib:${LD_LIBRARY_PATH:-}"
+        log "retrying ssl import with LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+    fi
+fi
+"$PY" -c "import ssl" 2>/dev/null || fail "edge python cannot import ssl (check /opt/openssl35 and /usr/lib/libssl.so.3)"
 "$PY" -c "import sqlite3" 2>/dev/null || warn "edge python sqlite3 import failed"
 ok "python $("$PY" -c 'import sys; print(sys.version.split()[0])') with $("$PY" -c 'import ssl; print(ssl.OPENSSL_VERSION)')"
 step_done
@@ -429,6 +459,7 @@ if [ "$WRITE_PROFILE" = "1" ]; then
 export PATH="\$HOME/.local/bin:\${PATH}"
 export UV_DEFAULT_INDEX="\${UV_DEFAULT_INDEX:-$PIP_MIRROR}"
 export npm_config_registry="\${npm_config_registry:-$NPM_MIRROR}"
+[ -d /opt/openssl35/usr/lib ] && export LD_LIBRARY_PATH="/opt/openssl35/usr/lib:\${LD_LIBRARY_PATH:-}"
 PROF
     chmod +x /etc/profile.d/hermes.sh
 fi
