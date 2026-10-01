@@ -167,6 +167,14 @@ Every patch carries an `iSH (iOS) note:` comment and is idempotent. If an upstre
 python3 ~/.hermes/hermes-agent/scripts/build/ish-lockfill.py
 ```
 
+Restoring ~1350 tarballs is the slowest step on iSH. It fetches
+`HERMES_LOCKFILL_JOBS` (default 8) packages at a time; on a high-latency link
+lower it, on a fast one raise it:
+
+```sh
+HERMES_LOCKFILL_JOBS=16 python3 ~/.hermes/hermes-agent/scripts/build/ish-lockfill.py
+```
+
 **Roll back the system libraries** — originals are in `/opt/ish-backup`:
 
 ```sh

@@ -14,9 +14,15 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MIRROR = os.environ.get("HERMES_NPM_MIRROR", "https://registry.npmmirror.com")
+# Each package is one curl process; on iSH every round-trip costs several
+# seconds, so 1350 serial fetches take hours. Fetch a window of them at a time
+# (default 8). Unpack stays serial — the emulated filesystem does not like
+# concurrent extractall.
+JOBS = max(1, int(os.environ.get("HERMES_LOCKFILL_JOBS", "8")))
 
 
 def mirror_url(url: str) -> str:
@@ -84,6 +90,7 @@ def main() -> int:
     print(f"lockfile entries: {len(entries)}", flush=True)
 
     ok = skip = fail = 0
+    todo = []
     for path, version, resolved in entries:
         target = root / path
         pkg_json = target / "package.json"
@@ -96,12 +103,35 @@ def main() -> int:
                 skip += 1
                 continue
         name = path.split("node_modules/", 1)[1]
-        tgz = cache / f"{name.replace('/', '-')}-{version}.tgz"
-        if not download(mirror_url(resolved), tgz):
-            print(f"MISS {name}@{version}", flush=True)
-            fail += 1
-            continue
-        if unpack(tgz, target):
+        todo.append((path, version, resolved, name,
+                     cache / f"{name.replace('/', '-')}-{version}.tgz"))
+
+    print(f"to fetch: {len(todo)} (jobs={JOBS})", flush=True)
+
+    def fetch(item):
+        path, version, resolved, name, tgz = item
+        if download(mirror_url(resolved), tgz):
+            return item
+        print(f"MISS {name}@{version}", flush=True)
+        return None
+
+    # Warm the tarball cache concurrently; network-bound, so this is where the
+    # wall-clock actually goes. pool.map yields results in submission order.
+    fetched = []
+    done = 0
+    if todo:
+        with ThreadPoolExecutor(max_workers=JOBS) as pool:
+            for result in pool.map(fetch, todo):
+                done += 1
+                if result is not None:
+                    fetched.append(result)
+                else:
+                    fail += 1
+                if done % 50 == 0:
+                    print(f"  fetch progress: {done}/{len(todo)}", flush=True)
+
+    for path, version, resolved, name, tgz in fetched:
+        if unpack(tgz, root / path):
             ok += 1
             if (ok % 100) == 0:
                 print(f"  progress: {ok} fetched, {skip} skipped, {fail} failed", flush=True)
