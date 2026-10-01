@@ -268,6 +268,49 @@ def patch_worker(root: Path) -> None:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# 6. Chinese localisation for panels that bypass agent.i18n.
+#    Hermes ships locales/zh.yaml and routes most strings through t(), but
+#    `config show`'s headers and field labels are inline literals. Upstream
+#    edits would be lost on the next update, so we install a runtime shim and
+#    call it from the CLI entry point instead of touching those call sites.
+# ---------------------------------------------------------------------------
+def install_zh_patch(root: Path) -> None:
+    src = Path(__file__).resolve().parent.parent / "assets" / "zh-patch.py"
+    dst = root / "hermes_cli" / "zh_patch.py"
+    if not src.is_file():
+        PATCHES_FAILED.append("hermes_cli/zh_patch.py: asset missing")
+        return
+    import shutil
+    shutil.copyfile(src, dst)
+    PATCHES_APPLIED.append("hermes_cli/zh_patch.py (installed)")
+
+    main_py = root / "hermes_cli" / "main.py"
+    if not main_py.is_file():
+        PATCHES_FAILED.append("hermes_cli/main.py: missing")
+        return
+    text = read(main_py)
+    if "zh_patch" in text:
+        PATCHES_SKIPPED.append("hermes_cli/main.py (zh hook present)")
+        return
+    marker = "    import hermes_bootstrap  # noqa: F401\n"
+    inject = (
+        "    # iSH: localise panels that never adopted agent.i18n (config show\n"
+        "    # headers/labels are inline literals upstream). No-op unless zh is active.\n"
+        "    try:\n"
+        "        from hermes_cli import zh_patch as _zh\n"
+        "        _zh.install()\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )
+    if marker not in text:
+        PATCHES_FAILED.append("hermes_cli/main.py: bootstrap anchor not found")
+        return
+    write(main_py, text.replace(marker, inject + marker, 1))
+    PATCHES_APPLIED.append("hermes_cli/main.py (zh hook inserted)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", required=True, type=Path)
@@ -293,6 +336,7 @@ def main() -> int:
     install_rm_shim(root)
     patch_rm_consumers(root)
     patch_worker(root)
+    install_zh_patch(root)
 
     print(f"applied : {len(PATCHES_APPLIED)}")
     for name in PATCHES_APPLIED:
