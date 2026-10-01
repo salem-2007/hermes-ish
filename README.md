@@ -181,6 +181,21 @@ HERMES_LOCKFILL_JOBS=16 python3 ~/.hermes/hermes-agent/scripts/build/ish-lockfil
 cp -a /opt/ish-backup/libssl.so.3 /usr/lib/ && cp -a /opt/ish-backup/libcrypto.so.3 /usr/lib/
 ```
 
+## Native iOS (without iSH)?
+
+Short answer: **not currently possible.** Native iOS Python runtimes top out at
+3.11, while Hermes' ~50 core dependencies are all gated `python_version >= '3.14'`;
+`pydantic-core` and `cryptography` additionally need Rust, PyPI ships no iOS
+wheels, and there is no Node.js.
+
+Full analysis with evidence: [`docs/NATIVE-IOS.md`](docs/NATIVE-IOS.md).
+Run [`native-ios/probe.sh`](native-ios/probe.sh) on your device to verify the
+limits yourself — it is read-only.
+
+The practical alternative is a **remote Hermes + native iOS client**: run
+Hermes on a Linux host and connect from Blink Shell / a-Shell (native arm64
+terminal, no emulation) or use `hermes dashboard` from Safari.
+
 ## Licence
 
 The installer and patches: MIT. Hermes Agent itself is licensed by Nous Research — see its repository.
