@@ -65,7 +65,68 @@ log()   { printf '%s→%s %s\n' "$C_CYAN" "$C_NC" "$1"; }
 ok()    { printf '%s✓%s %s\n' "$C_GREEN" "$C_NC" "$1"; }
 warn()  { printf '%s⚠%s %s\n' "$C_YELLOW" "$C_NC" "$1"; }
 fail()  { printf '%s✗%s %s\n' "$C_RED" "$C_NC" "$1" >&2; exit 1; }
-step()  { printf '\n%s== %s ==%s\n' "$C_BOLD" "$1" "$C_NC"; }
+
+# --- progress bar & stage tracker --------------------------------------------
+TOTAL_STAGES=10
+CURRENT_STAGE=0
+STAGE_NAMES=("系统依赖" "下载源码" "系统库升级" "Python 3.14" "uv 安装" "应用补丁" "Python 依赖" "Node 工具链" "注册命令" "首次启动")
+
+progress_bar() {
+    local current=$1 total=$2 width=30 label="$3"
+    if [ ! -t 1 ] || [ "$total" -eq 0 ]; then return; fi
+    local pct=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    local bar="" pad=""
+    local i=0
+    while [ $i -lt $filled ]; do bar="${bar}█"; i=$((i+1)); done
+    i=0
+    while [ $i -lt $empty ]; do pad="${pad}░"; i=$((i+1)); done
+    printf "\r%s[%s%s] %3d%%  %s%s" "$C_CYAN" "$C_GREEN$bar$C_CYAN" "$pad" "$pct" "$label" "$C_NC"
+    if [ "$current" -ge "$total" ]; then printf "\n"; fi
+}
+
+step() {
+    CURRENT_STAGE=$((CURRENT_STAGE + 1))
+    if [ -t 1 ]; then
+        printf "\n"
+        progress_bar $((CURRENT_STAGE - 1)) "$TOTAL_STAGES" "准备中..."
+        printf "\n%s== [%d/%d] %s ==%s\n" "$C_BOLD" "$CURRENT_STAGE" "$TOTAL_STAGES" "$1" "$C_NC"
+    else
+        printf '\n== [%d/%d] %s ==\n' "$CURRENT_STAGE" "$TOTAL_STAGES" "$1"
+    fi
+}
+
+step_done() {
+    progress_bar "$CURRENT_STAGE" "$TOTAL_STAGES" "${STAGE_NAMES[$((CURRENT_STAGE-1))]:-完成}"
+}
+
+# --- spinner for long-running background tasks --------------------------------
+SPINNER_PID=""
+run_with_spinner() {
+    # Usage: run_with_spinner "label" command [args...]
+    # Runs the command in background, shows a spinner with elapsed time.
+    local label="$1"; shift
+    if [ ! -t 1 ]; then
+        "$@"; return $?
+    fi
+    local pid_file="/tmp/spinner_pid.$$"
+    "$@" &
+    local bg_pid=$!
+    local chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local i=0 elapsed=0
+    while kill -0 "$bg_pid" 2>/dev/null; do
+        local c="${chars:$((i % ${#chars})):1}"
+        printf "\r  %s%s%s %s (%ds)" "$C_CYAN" "$c" "$C_NC" "$label" "$elapsed"
+        sleep 1
+        i=$((i + 1))
+        elapsed=$((elapsed + 1))
+    done
+    wait "$bg_pid" 2>/dev/null
+    local rc=$?
+    printf "\r"  # clear spinner line
+    return $rc
+}
 
 require_ish() {
     if [ ! -e /proc/ish ] && [ "${HERMES_FORCE:-0}" != "1" ]; then
@@ -85,6 +146,7 @@ for pkg in bash curl tar xz gzip git python3 libstdc++ openssl ca-certificates; 
     fi
 done
 ok "prerequisites ready"
+step_done
 
 # --- 2. fetch the source tree ------------------------------------------------
 step "Downloading Hermes Agent ($VERSION)"
@@ -114,6 +176,7 @@ fetch_tarball() {
 
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
     ok "existing checkout found at $INSTALL_DIR (skipping download)"
+step_done
 else
     fetch_tarball || fail "download failed — check your network or set HERMES_PROXY"
     mkdir -p "$HERMES_HOME"
@@ -123,6 +186,7 @@ else
     [ -n "$EXTRACTED" ] || fail "extracted directory not found"
     mv "$EXTRACTED" "$INSTALL_DIR"
     ok "source at $INSTALL_DIR"
+step_done
 fi
 
 # --- 3. system libraries (OpenSSL 3.5.8 / SQLite 3.53.4) ---------------------
@@ -212,6 +276,7 @@ if [ -f /opt/sqlite-libs/usr/lib/libsqlite3.so.3.53.4 ]; then
     ln -sf libsqlite3.so.3.53.4 /usr/lib/libsqlite3.so.0
 fi
 ok "system libraries updated (originals in /opt/ish-backup)"
+step_done
 
 # --- 4. Alpine edge Python 3.14 (dynamic OpenSSL) ----------------------------
 # uv's python-build-standalone links OpenSSL statically; that build cannot do
@@ -231,6 +296,7 @@ PY=/opt/py314/usr/bin/python3.14
 "$PY" -c "import ssl" 2>/dev/null || fail "edge python cannot import ssl"
 "$PY" -c "import sqlite3" 2>/dev/null || warn "edge python sqlite3 import failed"
 ok "python $("$PY" -c 'import sys; print(sys.version.split()[0])') with $("$PY" -c 'import ssl; print(ssl.OPENSSL_VERSION)')"
+step_done
 
 # --- 5. uv -------------------------------------------------------------------
 step "uv (package manager)"
@@ -266,6 +332,7 @@ if [ ! -f "$PATCH_SCRIPT" ]; then
 fi
 [ -f "$PATCH_SCRIPT" ] || fail "patch script unavailable"
 "$PY" "$PATCH_SCRIPT" --source "$INSTALL_DIR" || fail "patch application failed"
+step_done
 
 # --- 7. virtualenv + Python dependencies -------------------------------------
 # uv on iSH can exit 0 with packages missing (the emulated runtime trips its
@@ -306,6 +373,7 @@ if ! deps_ok; then
     fi
 fi
 ok "python dependencies installed ($(ls .venv/lib/python3.14/site-packages 2>/dev/null | wc -l) packages)"
+step_done
 
 # --- 8. Node dependencies (TUI + web UI) -------------------------------------
 if [ "$SKIP_NODE" = "0" ]; then
@@ -325,6 +393,7 @@ if [ "$SKIP_NODE" = "0" ]; then
     fi
     export PATH="$NODE_DIR/bin:$PATH"
     ok "node $(node --version 2>/dev/null)"
+step_done
 
     step "Node dependencies (lockfile restore)"
     # Full `npm ci` cannot finish on iSH; rebuild from package-lock.json.
@@ -334,6 +403,7 @@ if [ "$SKIP_NODE" = "0" ]; then
     "$PY" "$LOCKFILL" --source "$INSTALL_DIR" 2>&1 | tail -5 \
         || warn "node dependency restore reported failures (build may still work)"
     ok "node_modules restored"
+step_done
 else
     warn "skipping Node toolchain (--skip-node)"
 fi
@@ -363,6 +433,7 @@ PROF
     chmod +x /etc/profile.d/hermes.sh
 fi
 ok "hermes command installed"
+step_done
 
 # --- 10. first launch (source completion) ------------------------------------
 step "Finishing installation (first launch)"
@@ -378,8 +449,10 @@ hermes config set display.language zh > /dev/null 2>&1 && log "display language 
 timeout 1800 hermes config show > "$HERMES_HOME/logs/first-launch.log" 2>&1
 if grep -q "Model\|模型" "$HERMES_HOME/logs/first-launch.log" 2>/dev/null; then
     ok "first launch complete"
+step_done
 else
     warn "first launch needs a rerun — run: hermes config show"
+step_done
 fi
 
 # --- done --------------------------------------------------------------------
