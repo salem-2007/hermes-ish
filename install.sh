@@ -316,10 +316,16 @@ fi
 PY=/opt/py314/usr/bin/python3.14
 # Edge python needs both libpython on the loader path AND a matching OpenSSL.
 # If the system libssl is too old (3.3.x) but /opt/openssl35 has 3.5.x, we
-# need LD_LIBRARY_PATH to pick it up. Try bare first, then with the override.
+# need LD_LIBRARY_PATH to pick it up. The _ssl.so extension also needs
+# libpython3.14.so which may not be on the default loader path yet.
+# Try bare first, then with progressive overrides.
 if ! "$PY" -c "import ssl" 2>/dev/null; then
-    if [ -d /opt/openssl35/usr/lib ]; then
-        export LD_LIBRARY_PATH="/opt/openssl35/usr/lib:${LD_LIBRARY_PATH:-}"
+    # Build a combined LD_LIBRARY_PATH covering all edge libs
+    _extra=""
+    [ -d /opt/openssl35/usr/lib ] && _extra="/opt/openssl35/usr/lib"
+    [ -d /opt/py314/usr/lib ] && { [ -n "$_extra" ] && _extra="$_extra:/opt/py314/usr/lib" || _extra="/opt/py314/usr/lib"; }
+    if [ -n "$_extra" ]; then
+        export LD_LIBRARY_PATH="$_extra:${LD_LIBRARY_PATH:-}"
         log "retrying ssl import with LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
     fi
 fi
@@ -459,7 +465,7 @@ if [ "$WRITE_PROFILE" = "1" ]; then
 export PATH="\$HOME/.local/bin:\${PATH}"
 export UV_DEFAULT_INDEX="\${UV_DEFAULT_INDEX:-$PIP_MIRROR}"
 export npm_config_registry="\${npm_config_registry:-$NPM_MIRROR}"
-[ -d /opt/openssl35/usr/lib ] && export LD_LIBRARY_PATH="/opt/openssl35/usr/lib:\${LD_LIBRARY_PATH:-}"
+[ -d /opt/openssl35/usr/lib ] && export LD_LIBRARY_PATH="/opt/openssl35/usr/lib:/opt/py314/usr/lib:\${LD_LIBRARY_PATH:-}"
 PROF
     chmod +x /etc/profile.d/hermes.sh
 fi
